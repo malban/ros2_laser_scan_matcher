@@ -90,6 +90,12 @@ private:
   bool publish_odom_;
   bool publish_tf_;
 
+  double xy_position_cov_scale_ = 1.0;
+  double xy_position_cov_offset_ = 0.0;
+
+  double xy_twist_cov_scale_ = 1.0;
+  double xy_twist_cov_offset_ = 0.0;
+
   tf2::Transform f2b_;     // fixed-to-base tf (pose of base frame in fixed frame)
   tf2::Transform prev_f2b_; // previous fixed-to-base tf (for odometry calculation)
   tf2::Transform f2b_kf_;  // pose of the last keyframe scan in fixed frame

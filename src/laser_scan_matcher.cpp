@@ -65,19 +65,22 @@ LaserScanMatcher::LaserScanMatcher() : Node("laser_scan_matcher"), initialized_(
   // Initiate parameters
 
    RCLCPP_INFO(get_logger(), "Creating laser_scan_matcher");
-  add_parameter("publish_odom", rclcpp::ParameterValue(std::string("")),
-    "If publish odometry from laser_scan. Empty if not, otherwise name of the topic");
+  add_parameter("publish_odom", rclcpp::ParameterValue(true),
+    "Whether to publish odometry from laser_scan.");
   add_parameter("publish_tf",   rclcpp::ParameterValue(false),
-    " If publish tf odom->base_link");
+    "Whether to publish tf transform from 'odom_frame' to 'base_frame'");
   
+  add_parameter("xy_position_cov_scale", rclcpp::ParameterValue(xy_position_cov_scale_),"");
+  add_parameter("xy_position_cov_offset", rclcpp::ParameterValue(xy_position_cov_offset_),"");
+
+  add_parameter("xy_twist_cov_scale", rclcpp::ParameterValue(xy_twist_cov_scale_),"");
+  add_parameter("xy_twist_cov_offset", rclcpp::ParameterValue(xy_twist_cov_offset_),"");
+
+
   add_parameter("base_frame", rclcpp::ParameterValue(std::string("base_link")),
     "Which frame to use for the robot base");
   add_parameter("odom_frame", rclcpp::ParameterValue(std::string("odom")),
     "Which frame to use for the odom");
-  add_parameter("map_frame", rclcpp::ParameterValue(std::string("map")),
-    "Which frame to use for the map");
-  add_parameter("laser_frame", rclcpp::ParameterValue(std::string("laser")),
-    "Which frame to use for the laser");
   add_parameter("kf_dist_linear", rclcpp::ParameterValue(0.10),
     "When to generate keyframe scan.");
   add_parameter("kf_dist_angular", rclcpp::ParameterValue(10.0* (M_PI/180.0)),
@@ -169,7 +172,7 @@ LaserScanMatcher::LaserScanMatcher() : Node("laser_scan_matcher"), initialized_(
   add_parameter("outliers_remove_doubles", rclcpp::ParameterValue(1),
     "No two points in laser_sens can have the same corr.");
   
-  add_parameter("do_compute_covariance", rclcpp::ParameterValue(0),
+  add_parameter("do_compute_covariance", rclcpp::ParameterValue(true),
     "If 1, computes the covariance of ICP using the method http://purl.org/censi/2006/icpcov");
   
   add_parameter("debug_verify_tricks", rclcpp::ParameterValue(0),
@@ -183,17 +186,17 @@ LaserScanMatcher::LaserScanMatcher() : Node("laser_scan_matcher"), initialized_(
   add_parameter("use_sigma_weights", rclcpp::ParameterValue(0),
     " If 1, the field 'readings_sigma' in the second scan is used to weight the correspondence by 1/sigma^2");
   
-
-  map_frame_  = this->get_parameter("map_frame").as_string();
   base_frame_ = this->get_parameter("base_frame").as_string();
   odom_frame_ = this->get_parameter("odom_frame").as_string();
-  laser_frame_ = this->get_parameter("laser_frame").as_string();
   kf_dist_linear_  = this->get_parameter("kf_dist_linear").as_double();
   kf_dist_angular_ = this->get_parameter("kf_dist_angular").as_double();
-  odom_topic_   = this->get_parameter("publish_odom").as_string();
+  publish_odom_   = this->get_parameter("publish_odom").as_bool();
   publish_tf_   = this->get_parameter("publish_tf").as_bool(); 
+  xy_position_cov_scale_ = get_parameter("xy_position_cov_scale").as_double();
+  xy_position_cov_offset_ = get_parameter("xy_position_cov_offset").as_double();
+  xy_twist_cov_scale_ = get_parameter("xy_twist_cov_scale").as_double();
+  xy_twist_cov_offset_ = get_parameter("xy_twist_cov_offset").as_double();
 
-  publish_odom_ = (odom_topic_ != "");
   kf_dist_linear_sq_ = kf_dist_linear_ * kf_dist_linear_;
 
   input_.max_angular_correction_deg = this->get_parameter("max_angular_correction_deg").as_double();
@@ -218,11 +221,12 @@ LaserScanMatcher::LaserScanMatcher() : Node("laser_scan_matcher"), initialized_(
   input_.outliers_adaptive_mult = this->get_parameter("outliers_adaptive_mult").as_double();
   input_.do_visibility_test = this->get_parameter("do_visibility_test").as_int();
   input_.outliers_remove_doubles = this->get_parameter("outliers_remove_doubles").as_int();
-  input_.do_compute_covariance = this->get_parameter("do_compute_covariance").as_int();
+  input_.do_compute_covariance = this->get_parameter("do_compute_covariance").as_bool();
   input_.debug_verify_tricks = this->get_parameter("debug_verify_tricks").as_int();
   input_.use_ml_weights = this->get_parameter("use_ml_weights").as_int();
   input_.use_sigma_weights = this->get_parameter("use_sigma_weights").as_int();
 
+  RCLCPP_WARN(get_logger(),"do_compute_covariance: %d", input_.do_compute_covariance);
 
   double transform_publish_period;
   double tmp;
@@ -243,12 +247,15 @@ LaserScanMatcher::LaserScanMatcher() : Node("laser_scan_matcher"), initialized_(
 
 
   // Subscribers
-  this->scan_filter_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>("scan", rclcpp::SensorDataQoS(), std::bind(&LaserScanMatcher::scanCallback, this, std::placeholders::_1));
+  scan_filter_sub_ = create_subscription<sensor_msgs::msg::LaserScan>("scan", rclcpp::SensorDataQoS(), std::bind(&LaserScanMatcher::scanCallback, this, std::placeholders::_1));
   tf_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
-  if (publish_tf_)
+
+  // Publishers
+  if (publish_tf_) {
     tfB_ = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
-  if(publish_odom_){
-    odom_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>(odom_topic_, rclcpp::SystemDefaultsQoS());
+  }
+  if (publish_odom_) {
+    odom_publisher_ = create_publisher<nav_msgs::msg::Odometry>("odom", rclcpp::SystemDefaultsQoS());
   }
 }
 
@@ -277,7 +284,6 @@ void LaserScanMatcher::createCache (const sensor_msgs::msg::LaserScan::SharedPtr
 
 
 void LaserScanMatcher::scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr scan_msg)
-
 {
 
   if (!initialized_)
@@ -285,7 +291,7 @@ void LaserScanMatcher::scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr
     createCache(scan_msg);    // caches the sin and cos of all angles
 
     // cache the static tf from base to laser
-    if (!getBaseToLaserTf(laser_frame_))
+    if (!getBaseToLaserTf(scan_msg->header.frame_id))
     {
       RCLCPP_WARN(get_logger(),"Skipping scan");
       return;
@@ -332,11 +338,8 @@ bool LaserScanMatcher::getBaseToLaserTf (const std::string& frame_id)
   return true;
 }
 
-
 bool LaserScanMatcher::processScan(LDP& curr_ldp_scan, const rclcpp::Time& time)
 {
-
-
   // CSM is used in the following way:
   // The scans are always in the laser frame
   // The reference scan (prevLDPcan_) has a pose of [0, 0, 0]
@@ -447,11 +450,21 @@ bool LaserScanMatcher::processScan(LDP& curr_ldp_scan, const rclcpp::Time& time)
     odom_msg.pose.pose.orientation.z = f2b_.getRotation().z();
     odom_msg.pose.pose.orientation.w = f2b_.getRotation().w();
 
+    odom_msg.pose.covariance[0] *= xy_position_cov_scale_;
+    odom_msg.pose.covariance[0] += xy_position_cov_offset_;
+    odom_msg.pose.covariance[7] *= xy_position_cov_scale_;
+    odom_msg.pose.covariance[7] += xy_position_cov_offset_;
+
     // Get pose difference in base frame and calculate velocities
     auto pose_difference = prev_f2b_.inverse() * f2b_;
     odom_msg.twist.twist.linear.x = pose_difference.getOrigin().getX()/dt;
     odom_msg.twist.twist.linear.y = pose_difference.getOrigin().getY()/dt;
     odom_msg.twist.twist.angular.z = tf2::getYaw(pose_difference.getRotation())/dt;
+
+    odom_msg.twist.covariance[0] *= xy_twist_cov_scale_;
+    odom_msg.twist.covariance[0] += xy_twist_cov_offset_;
+    odom_msg.twist.covariance[7] *= xy_twist_cov_scale_;
+    odom_msg.twist.covariance[7] += xy_twist_cov_offset_;
 
     prev_f2b_ = f2b_;
 
@@ -473,7 +486,6 @@ bool LaserScanMatcher::processScan(LDP& curr_ldp_scan, const rclcpp::Time& time)
     tf_msg.header.stamp = time;
     tf_msg.header.frame_id = odom_frame_;
     tf_msg.child_frame_id = base_frame_;
-    //tf2::Stamped<tf2::Transform> transform_msg (f2b_, time, map_frame_, base_frame_);
     tfB_->sendTransform (tf_msg);
   }
 
